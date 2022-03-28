@@ -1,10 +1,7 @@
 /*
-  Buildbotics / Onefinity CNC controller remote source code. V1.1 (C) 2021 Michel Satoer, Satoer Design.
-  info: http://satoer.com/products/cnc-remote-control-panel-v1/
-  You may use it for your own project as long as it is non-commercial.
-  Feel free to create your own project with it. Adjust it for your own needs.
-  Even with hardware I didn't provide. But you may not create a commercial product with it. 
-
+  Buildbotics / Onefinity CNC controller remote source code. V1.5 (C) 2021 Michel Satoer, Satoer Creations.
+  info: https://satoer.com/cnc-remote-panel-v3/
+  
   Used Libraries:
   ShiftRegister74HC595 Arduino Library by Timo Denk:
   https://timodenk.com/blog/shift-register-arduino-library/
@@ -23,6 +20,7 @@
 #include <Joystick.h>
 
 #define epromChecksum 31415  // change this to a different random number beween 0 and 65535 if you want to erase the eeprom and load default values.
+#define dustCollectorDelay 1000 // This is the delay time in ms for the dust collector in AUTO mode. This delay prevents a big power surge by not starting 2 devices at once. Change to 0 if you don't want this behaviour
 #define debugMode false
 #define buttonDebounceTime 20
 #define sToggleSwitch 0
@@ -48,13 +46,13 @@
 #define ledSpeed1 9
 #define ledSpeed2 10
 #define ledSpeed3 11
-#define ledSpindle 12
+#define ledRouter 12
 #define ledDustCollector 13
 #define ledAcc1 14
 #define ledAcc2 15
-#define ledSpindleOn 3
-#define ledSpindleOff 2
-#define ledSpindleAuto 1
+#define ledRouterOn 3
+#define ledRouterOff 2
+#define ledRouterAuto 1
 #define ledDustCollectorOn 6
 #define ledDustCollectorOff 5
 #define ledDustCollectorAuto 4
@@ -63,7 +61,7 @@
 #define yAxisControl A1
 #define zAxisControl A2
 
-#define relaySpindle 5
+#define relayRouter 5
 #define relayDustCollector 6
 #define relayAcc1 3
 #define relayAcc2 4
@@ -80,7 +78,7 @@ struct settingsStruct {
   byte acc1Type;
   byte acc2Type;
   byte dustCollectorDefault;
-  byte spindleDefault;
+  byte routerDefault;
   byte speedDefault;
   bool XAxisReversed;
   bool YAxisReversed;
@@ -98,7 +96,7 @@ settingsStruct settings = {
   sToggleSwitch,  // acc1Type; sToggleSwitch or sMomentarySwitch
   sToggleSwitch,  // acc2Type; sToggleSwitch or sMomentarySwitch
   sOff,           // dustCollectorDefault;
-  sOff,           // spindleDefault;
+  sOff,           // routerDefault;
   2,              // speedDefault;
   false,          // XAxisReversed;
   false,          // YAxisReversed;
@@ -120,7 +118,8 @@ const byte latchPin = A4;       // STCP
 ShiftRegister74HC595<2> led(serialDataPin, clockPin, latchPin);
 
 unsigned long previousMillis = 0;  
-unsigned long lastSpindleTrigger = 0;  
+unsigned long lastRouterTrigger = 0;  
+unsigned long lastDustCollectorTrigger = 0;
 
 
 int joystickXZeropoint = 512;
@@ -140,12 +139,12 @@ int previousJoystickXPosition[3] = { 0, 0, 0 };
 byte previousButton = 0;
 bool enableXAxis = true;
 bool enableYAxis = true;
-bool enableSpindle = false;
+bool enableRouter = false;
 bool acc1Enabled = false;
 bool acc2Enabled = false;
 bool enableDustCollector = false;
 byte speedSetting = 0;
-byte spindelSetting = 0;
+byte routerSetting = 0;
 byte dustCollectorSetting = 0;
 
 byte buttons[2][5] = {  // The symbols of the keys
@@ -182,10 +181,10 @@ byte lastButton() {
 }
 
 
-void setSpindleLed() {
-  led.set(ledSpindleOn,         (spindelSetting == 0));
-  led.set(ledSpindleOff,        (spindelSetting == 1));
-  led.set(ledSpindleAuto,       (spindelSetting == 2));  
+void setRouterLed() {
+  led.set(ledRouterOn,         (routerSetting == 0));
+  led.set(ledRouterOff,        (routerSetting == 1));
+  led.set(ledRouterAuto,       (routerSetting == 2));  
 }
 
 void setDustCollectorLed() {
@@ -228,6 +227,10 @@ void toggleAxis(byte axis){
 
 void setSpeed (byte speed){  
   speedSetting = speed;
+  led.set(ledSpeed0, (speed==0));
+  led.set(ledSpeed1, (speed==1));
+  led.set(ledSpeed2, (speed==2));
+  led.set(ledSpeed3, (speed==3));  
   Joystick.setButton(jBtnMapSpeed0, (speed==0));
   Joystick.setButton(jBtnMapSpeed1, (speed==1));
   Joystick.setButton(jBtnMapSpeed2, (speed==2));
@@ -237,10 +240,6 @@ void setSpeed (byte speed){
   Joystick.releaseButton(jBtnMapSpeed1);
   Joystick.releaseButton(jBtnMapSpeed2);
   Joystick.releaseButton(jBtnMapSpeed3);
-  led.set(ledSpeed0, (speed==0));
-  led.set(ledSpeed1, (speed==1));
-  led.set(ledSpeed2, (speed==2));
-  led.set(ledSpeed3, (speed==3));
 }
 
 void setup() {
@@ -371,20 +370,20 @@ void setup() {
         }
       break;
 
-      case 7:  //default Spindle Mode
+      case 7:  //default Router Mode
         do {
           timeCounter++;
-          led.set(ledSpindle, true);
+          led.set(ledRouter, true);
           delay(50);
-          led.set(ledSpindle, false);
+          led.set(ledRouter, false);
           delay(50);
         }
         while ((lastButton()!=107)&&(timeCounter<30));
         
         if (timeCounter>=30){ //Button longer than 3 second hold adjust and save new settings
-          settings.spindleDefault++;
-          if (settings.spindleDefault > 2) {
-          settings.spindleDefault = 0;
+          settings.routerDefault++;
+          if (settings.routerDefault > 2) {
+          settings.routerDefault = 0;
           }
           EEPROM.put(0, settings);         
           flashall(6);
@@ -487,10 +486,10 @@ void setup() {
   }
 
   speedSetting         = settings.speedDefault;
-  spindelSetting       = settings.spindleDefault;
+  routerSetting       = settings.routerDefault;
   dustCollectorSetting = settings.dustCollectorDefault;
 
-  pinMode(relaySpindle, OUTPUT);
+  pinMode(relayRouter, OUTPUT);
   pinMode(relayDustCollector, OUTPUT);
   pinMode(relayAcc1, OUTPUT);
   pinMode(relayAcc2, OUTPUT);
@@ -498,7 +497,7 @@ void setup() {
   led.setAllHigh(); // Turn on all LEDS
   delay(1000);
   led.setAllLow();  // Turn off all LEDS
-  setSpindleLed();
+  setRouterLed();
   setDustCollectorLed();
   led.set(ledXAxis, enableXAxis);
   led.set(ledYAxis, enableYAxis);
@@ -594,10 +593,10 @@ void loop() {
       case 6:  //Button Speed3
         setSpeed (3);
         break;
-      case 7:  //Button Spindle
-        spindelSetting++;
-        if (spindelSetting > 2) {
-          spindelSetting = 0;
+      case 7:  //Button Router
+        routerSetting++;
+        if (routerSetting > 2) {
+          routerSetting = 0;
         }             
         break;
       case 8:  //Button Dust Collection
@@ -653,32 +652,50 @@ void loop() {
     
   }
 
-  //Switch on/off the spindle and dustcollector:
+  //Switch on/off the router:
   //It checks if there's a signal the past 15ms (to ignore PWM triggering)
-  bool SpindleActivate = false;
+  bool routerActivate = false;
   if (!digitalRead(cncInputIO)){ //(active low)
-    lastSpindleTrigger=millis();
+    lastRouterTrigger=millis();
   }  
   
-  if (millis() -15 < lastSpindleTrigger) {
-    SpindleActivate = true;
+  if (millis() -15 < lastRouterTrigger) {
+    routerActivate = true;
   }
 
-  switch (spindelSetting) {
+
+  //Switch on the dust collector with a delay of "dustCollectorDelay" to prevent a big power surge (only if Router is in auto mode) :
+  bool dustCollectorActivate = false; 
+ 
+  if (!routerActivate){
+    lastDustCollectorTrigger=millis();
+  } else
+  { 
+    if (routerSetting!=sAuto) {
+      dustCollectorActivate = true;
+    } else
+    {
+      if (millis() -dustCollectorDelay > lastDustCollectorTrigger) {
+        dustCollectorActivate = true;
+      }
+    }
+  }
+  
+  switch (routerSetting) {
       case sOn:  //Button XAxis enabled
-        digitalWrite(relaySpindle,HIGH);
-        led.set(ledSpindle, true);
+        digitalWrite(relayRouter,HIGH);
+        led.set(ledRouter, true);
         break;
       case sOff:  //Button XAxis enabled
-        digitalWrite(relaySpindle,LOW);
-        led.set(ledSpindle, false);
+        digitalWrite(relayRouter,LOW);
+        led.set(ledRouter, false);
         break;
       case sAuto:  //Button XAxis enabled
-        digitalWrite(relaySpindle,SpindleActivate);
-        led.set(ledSpindle, SpindleActivate);
+        digitalWrite(relayRouter,routerActivate);
+        led.set(ledRouter, routerActivate);
         break;
   }
-  setSpindleLed();
+  setRouterLed();
   
   switch (dustCollectorSetting) {
       case sOn:  //Button XAxis enabled
@@ -690,8 +707,8 @@ void loop() {
         led.set(ledDustCollector, false);
         break;
       case sAuto:  //Button XAxis enabled
-        digitalWrite(relayDustCollector,SpindleActivate);
-        led.set(ledDustCollector, SpindleActivate);
+        digitalWrite(relayDustCollector,dustCollectorActivate);
+        led.set(ledDustCollector, dustCollectorActivate);
         break;
   }
   setDustCollectorLed();
